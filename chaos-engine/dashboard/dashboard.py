@@ -430,4 +430,241 @@ def build_gauge(score: float) -> go.Figure:
         height=230,
     )
     return fig
+# ---------------------------------------------------------------------------
+# Chaos scenarios
+# ---------------------------------------------------------------------------
+CHAOS_SCENARIOS = [
+    {
+        "label": "💀 Pod Kill",
+        "fault": "pod-failure",
+        "payload": {"selector": {"app": "cartservice"}, "duration": "60s"},
+        "desc": "Terminates cartservice pod",
+    },
+    {
+        "label": "🔥 CPU Stress",
+        "fault": "stress-cpu",
+        "payload": {"workers": 4, "duration": "90s", "target": "recommendationservice"},
+        "desc": "Burns 4 cores on recommendation svc",
+    },
+    {
+        "label": "🧠 Memory Hog",
+        "fault": "stress-mem",
+        "payload": {"size": "512M", "duration": "60s", "target": "frontend"},
+        "desc": "Allocates 512MB on frontend pod",
+    },
+    {
+        "label": "🌐 Network Partition",
+        "fault": "network-partition",
+        "payload": {"source": "checkoutservice", "target": "paymentservice", "duration": "45s"},
+        "desc": "Blocks checkout → payment traffic",
+    },
+    {
+        "label": "⏱  Latency Inject",
+        "fault": "network-delay",
+        "payload": {"delay": "2000ms", "target": "productcatalogservice", "duration": "60s"},
+        "desc": "Adds 2s delay on catalog svc",
+    },
+    {
+        "label": "📦 Disk Pressure",
+        "fault": "disk-fill",
+        "payload": {"fill_bytes": "1G", "target": "redis-cart", "duration": "30s"},
+        "desc": "Fills disk on Redis node",
+    },
+]
+ 
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown('<div style="font-family:\'Syne\',sans-serif;font-size:1.1rem;font-weight:800;'
+                'background:linear-gradient(90deg,#00e5ff,#7c4dff);-webkit-background-clip:text;'
+                '-webkit-text-fill-color:transparent;margin-bottom:1rem;">⚡ CHAOS PLATFORM</div>',
+                unsafe_allow_html=True)
+ 
+    st.markdown("##### 🔧 Configuration")
+    st.session_state.backend_url = st.text_input(
+        "ML Backend URL", value=st.session_state.backend_url, key="cfg_backend"
+    )
+    st.session_state.chaos_url = st.text_input(
+        "Chaos Operator URL", value=st.session_state.chaos_url, key="cfg_chaos"
+    )
+ 
+    st.divider()
+    st.session_state.auto_heal = st.toggle("🛡️ Autonomous Healing", value=st.session_state.auto_heal)
+    inject_mode = st.toggle("🧪 Synthetic Telemetry Mode", value=True)
+ 
+    st.divider()
+    st.markdown("##### 📊 Session Stats")
+    uptime_s = int(time.time() - st.session_state.uptime_start)
+    h, m, s = uptime_s // 3600, (uptime_s % 3600) // 60, uptime_s % 60
+    st.metric("Uptime", f"{h:02d}:{m:02d}:{s:02d}")
+    st.metric("Anomalies Detected", st.session_state.total_anomalies)
+    st.metric("Auto-Recoveries", st.session_state.total_recovered)
+ 
+    st.divider()
+    st.caption("Tech Solstice — PS1 | Person B: ML & UI")
+ 
+# ---------------------------------------------------------------------------
+# Main layout
+# ---------------------------------------------------------------------------
+ 
+# ── Header ──────────────────────────────────────────────────────────────────
+score = st.session_state.last_score
+if score < 0.4:
+    status_badge = '<span class="badge badge-ok">NOMINAL</span>'
+elif score < 0.7:
+    status_badge = '<span class="badge badge-warn">ELEVATED</span>'
+else:
+    status_badge = '<span class="badge badge-crit">CRITICAL</span>'
+ 
+st.markdown(f"""
+<div class="sre-header">
+  <div>
+    <div class="logo">⚡ NEXUS — Autonomous SRE</div>
+    <div class="subtitle">Chaos Engineering &amp; Self-Healing Platform · Tech Solstice PS1</div>
+  </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:1rem;">
+    <span><span class="live-dot"></span><span style="font-size:0.7rem;color:#64748b;letter-spacing:.1em;">LIVE</span></span>
+    {status_badge}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+ 
+# ── KPI Row ─────────────────────────────────────────────────────────────────
+k1, k2, k3, k4 = st.columns(4)
+cpu_now = st.session_state.history_cpu[-1] if st.session_state.history_cpu else 0.0
+mem_now = st.session_state.history_mem[-1] if st.session_state.history_mem else 0.0
+lat_now = st.session_state.history_latency[-1] if st.session_state.history_latency else 0.0
+ 
+cpu_color  = "red" if cpu_now > 80 else ("amber" if cpu_now > 60 else "cyan")
+mem_color  = "red" if mem_now > 80 else ("amber" if mem_now > 60 else "green")
+lat_color  = "red" if lat_now > 1000 else ("amber" if lat_now > 400 else "cyan")
+heal_color = "green"
+ 
+with k1:
+    st.markdown(f'<div class="kpi-card {cpu_color}"><div class="kpi-label">CPU Usage</div>'
+                f'<div class="kpi-value" style="color:var(--accent-{"red" if cpu_now>80 else "cyan"})">{cpu_now:.1f}</div>'
+                f'<div class="kpi-unit">percent</div></div>', unsafe_allow_html=True)
+with k2:
+    st.markdown(f'<div class="kpi-card {mem_color}"><div class="kpi-label">Memory Usage</div>'
+                f'<div class="kpi-value" style="color:var(--accent-{"red" if mem_now>80 else "green"})">{mem_now:.1f}</div>'
+                f'<div class="kpi-unit">percent</div></div>', unsafe_allow_html=True)
+with k3:
+    st.markdown(f'<div class="kpi-card {lat_color}"><div class="kpi-label">P99 Latency</div>'
+                f'<div class="kpi-value" style="color:var(--accent-{"red" if lat_now>1000 else "amber"})">{lat_now:.0f}</div>'
+                f'<div class="kpi-unit">milliseconds</div></div>', unsafe_allow_html=True)
+with k4:
+    st.markdown(f'<div class="kpi-card {heal_color}"><div class="kpi-label">Auto-Recoveries</div>'
+                f'<div class="kpi-value" style="color:var(--accent-green)">{st.session_state.total_recovered}</div>'
+                f'<div class="kpi-unit">actions taken</div></div>', unsafe_allow_html=True)
+ 
+st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+ 
+# ── Main 3-column layout ─────────────────────────────────────────────────────
+col_charts, col_gauge, col_log = st.columns([3.2, 1.6, 2.2])
+ 
+with col_charts:
+    st.markdown('<div class="section-title">📡 Cluster Heartbeat</div>', unsafe_allow_html=True)
+    chart_placeholder = st.empty()
+ 
+    st.markdown('<div class="section-title" style="margin-top:1rem">⏱  Service Latency</div>', unsafe_allow_html=True)
+    latency_placeholder = st.empty()
+ 
+with col_gauge:
+    st.markdown('<div class="section-title">🎯 Threat Level</div>', unsafe_allow_html=True)
+    gauge_placeholder = st.empty()
+ 
+    st.markdown('<div class="section-title" style="margin-top:0.5rem">🔬 Last Analysis</div>', unsafe_allow_html=True)
+    analysis_placeholder = st.empty()
+ 
+with col_log:
+    st.markdown('<div class="section-title">🤖 Autonomous Action Log</div>', unsafe_allow_html=True)
+    log_placeholder = st.empty()
+ 
+# ── Chaos Control Panel ───────────────────────────────────────────────────────
+st.markdown('<div class="section-title" style="margin-top:1rem">☢️ Chaos Control Panel</div>', unsafe_allow_html=True)
+ 
+chaos_cols = st.columns(6)
+for i, scenario in enumerate(CHAOS_SCENARIOS):
+    with chaos_cols[i]:
+        st.markdown(
+            f'<div style="font-size:0.6rem;color:#64748b;margin-bottom:0.3rem;">{scenario["desc"]}</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(scenario["label"], key=f"chaos_{i}"):
+            _trigger_chaos(scenario["fault"], scenario["payload"])
+ 
+# ---------------------------------------------------------------------------
+# Telemetry loop — tick every REFRESH_INTERVAL_S seconds
+# ---------------------------------------------------------------------------
+_log("Platform initialised — monitoring 11 microservices", "info")
+_log("Isolation Forest model online (200 estimators)", "ok")
+_log("Chaos Mesh adapter ready", "info")
+ 
+while True:
+    # 1. Collect telemetry
+    cpu, mem, latency = _simulate_telemetry()
+    ts = _now_str()
+ 
+    # 2. Analyse with ML backend
+    result = _call_ml_backend(cpu, mem, latency)
+ 
+    if result:
+        is_anomaly  = result.get("is_anomaly", False)
+        threat_score = float(result.get("threat_score", 0.0))
+        action       = result.get("recommended_action", "NO_ACTION")
+        processing   = result.get("processing_time_ms", 0.0)
+ 
+        st.session_state.last_score  = threat_score
+        st.session_state.last_action = action
+ 
+        _append_history(ts, cpu, mem, latency, threat_score)
+ 
+        if is_anomaly:
+            st.session_state.total_anomalies += 1
+            _log(f"🚨 ANOMALY DETECTED — score={threat_score:.3f}  action={action}", "crit")
+ 
+            if st.session_state.auto_heal and action != "NO_ACTION":
+                _execute_recovery(action)
+                st.session_state.total_recovered += 1
+ 
+    # 3. Render charts
+    chart_placeholder.plotly_chart(
+        build_heartbeat_chart(), use_container_width=True, config={"displayModeBar": False}
+    )
+    latency_placeholder.plotly_chart(
+        build_latency_chart(), use_container_width=True, config={"displayModeBar": False}
+    )
+    gauge_placeholder.plotly_chart(
+        build_gauge(st.session_state.last_score),
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+ 
+    # 4. Analysis card
+    action_colors = {
+        "NO_ACTION":         "#00e676",
+        "RESTART_POD":       "#ff3d5a",
+        "SCALE_OUT_HPA":     "#ffab00",
+        "REROUTE_TRAFFIC":   "#7c4dff",
+        "FLUSH_REDIS_CACHE": "#00e5ff",
+        "DRAIN_NODE":        "#ff3d5a",
+    }
+    a_color = action_colors.get(action, "#64748b")
+    analysis_placeholder.markdown(f"""
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
+            padding:0.9rem;font-size:0.68rem;line-height:2;">
+  <div><span style="color:#64748b">ANOMALY  </span><span style="color:{'#ff3d5a' if is_anomaly else '#00e676'};font-weight:700">{'YES' if is_anomaly else 'NO'}</span></div>
+  <div><span style="color:#64748b">SCORE    </span><span style="color:{a_color};font-weight:700">{threat_score:.4f}</span></div>
+  <div><span style="color:#64748b">ACTION   </span><span style="color:{a_color};font-weight:700">{action}</span></div>
+  <div><span style="color:#64748b">LATENCY  </span><span style="color:#64748b">{processing:.1f}ms</span></div>
+</div>
+""", unsafe_allow_html=True)
+ 
+    # 5. Action log
+    log_html = '<div class="action-log">' + "".join(st.session_state.action_log) + "</div>"
+    log_placeholder.markdown(log_html, unsafe_allow_html=True)
+ 
+    # 6. Wait
+    time.sleep(REFRESH_INTERVAL_S)
  
