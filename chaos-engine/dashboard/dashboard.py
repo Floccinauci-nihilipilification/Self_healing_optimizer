@@ -353,20 +353,20 @@ PLOTLY_BASE = dict(
 def build_heartbeat_chart() -> go.Figure:
     t = st.session_state.history_time
     fig = go.Figure()
- 
+
     traces = [
-        ("CPU %",      st.session_state.history_cpu,     "#00e5ff", True),
-        ("MEM %",      st.session_state.history_mem,     "#7c4dff", True),
-        ("Score×100",  [s * 100 for s in st.session_state.history_score], "#ff3d5a", True),
+        ("CPU %",     st.session_state.history_cpu,                      "#00e5ff", "rgba(0,229,255,0.04)"),
+        ("MEM %",     st.session_state.history_mem,                      "#7c4dff", "rgba(124,77,255,0.04)"),
+        ("Score×100", [s * 100 for s in st.session_state.history_score], "#ff3d5a", "rgba(255,61,90,0.04)"),
     ]
-    for name, y, color, _ in traces:
+    for name, y, color, fillcolor in traces:
         fig.add_trace(go.Scatter(
             x=t, y=y, name=name, mode="lines",
             line=dict(color=color, width=1.5),
             fill="tozeroy",
-            fillcolor=color.replace("#", "rgba(").rstrip(")") + ",0.04)",
+            fillcolor=fillcolor,
         ))
- 
+
     fig.update_layout(
         **PLOTLY_BASE,
         height=200,
@@ -375,7 +375,6 @@ def build_heartbeat_chart() -> go.Figure:
         hovermode="x unified",
     )
     return fig
- 
  
 def build_latency_chart() -> go.Figure:
     t = st.session_state.history_time
