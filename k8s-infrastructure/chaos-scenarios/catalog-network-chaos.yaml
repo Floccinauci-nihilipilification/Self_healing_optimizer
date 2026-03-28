@@ -1,0 +1,18 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: frontend-to-catalog-loss
+  namespace: applications
+spec:
+  action: loss
+  mode: all
+  selector:
+    namespaces:
+      - applications
+    labelSelectors:
+      app: productcatalogservice
+  loss:
+    loss: "100"
+    correlation: "0"
+  direction: to
+  duration: "45s"

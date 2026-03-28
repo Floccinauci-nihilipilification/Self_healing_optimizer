@@ -41,8 +41,8 @@ logger = logging.getLogger("chaos.dashboard")
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-ML_BACKEND_URL = "http://ml_backend:8000"  # override via env / sidebar
-CHAOS_API_URL = "http://chaos_operator:9000"  # Person A's endpoint
+ML_BACKEND_URL = "http://localhost:8000"  # override via env / sidebar
+CHAOS_API_URL = "http://localhost:9000"  # Person A's endpoint
 MAX_HISTORY = 120  # data points retained in session
 REFRESH_INTERVAL_S = 1
  
@@ -249,21 +249,24 @@ def _log(msg: str, level: str = "info") -> None:
  
  
 def _simulate_telemetry() -> tuple[float, float, float]:
-    """Generate synthetic telemetry if Prometheus is unavailable."""
-    t = time.time()
-    # Add occasional spikes to make it interesting
-    spike = random.random() < 0.08
-    if spike:
-        return (
-            random.uniform(85, 99),
-            random.uniform(80, 98),
-            random.uniform(1500, 8000),
-        )
-    cpu = 30 + 15 * abs(0.5 - ((t % 60) / 60)) + random.gauss(0, 4)
-    mem = 50 + 10 * abs(0.5 - ((t % 90) / 90)) + random.gauss(0, 5)
-    lat = 100 + 80 * abs(0.5 - ((t % 45) / 45)) + random.gauss(0, 20)
-    return float(min(max(cpu, 5), 99)), float(min(max(mem, 10), 99)), float(max(lat, 20))
- 
+    try:
+        base = "http://localhost:9090/api/v1/query"
+        
+        cpu_r = httpx.get(base, params={"query": 'rate(container_cpu_usage_seconds_total{namespace="applications",container!=""}[2m])'}, timeout=3)
+        mem_r = httpx.get(base, params={"query": 'container_memory_usage_bytes{namespace="applications",container!=""}'}, timeout=3)
+        
+        cpu_data = cpu_r.json()["data"]["result"]
+        mem_data = mem_r.json()["data"]["result"]
+        
+        cpu = sum(float(x["value"][1]) for x in cpu_data) * 100 if cpu_data else 10.0
+        mem_bytes = sum(float(x["value"][1]) for x in mem_data) if mem_data else 0
+        mem = (mem_bytes / (4 * 1024**3)) * 100
+        latency = random.uniform(80, 200)
+        
+        return round(min(cpu, 100), 2), round(min(mem, 100), 2), round(latency, 2)
+    except Exception as e:
+        logger.warning("Prometheus fetch failed: %s", e)
+        return random.uniform(20, 40), random.uniform(40, 60), random.uniform(80, 200)
  
 def _call_ml_backend(cpu: float, mem: float, latency: float) -> dict | None:
     try:
@@ -292,18 +295,24 @@ def _call_ml_backend(cpu: float, mem: float, latency: float) -> dict | None:
         }
  
  
-def _trigger_chaos(fault_type: str, payload: dict) -> None:
-    _log(f"💥 INJECTING FAULT → {fault_type}", "warn")
+def _trigger_chaos(fault: str, payload: dict) -> None:
+    import subprocess
+    chaos_files = {
+        "cpu_stress":       r"E:\Self-healing-system\k8s-infrastructure\chaos-scenarios\cpu-stress.yaml",
+        "pod_kill":         r"E:\Self-healing-system\k8s-infrastructure\chaos-scenarios\pod-kill.yaml",
+        "network_loss":     r"E:\Self-healing-system\k8s-infrastructure\chaos-scenarios\http-abort.yaml",
+        "memory_stress":    r"E:\Self-healing-system\k8s-infrastructure\chaos-scenarios\memory-stress.yaml",
+    }
+    if fault not in chaos_files:
+        _log(f"Unknown fault: {fault}", "warn")
+        return
     try:
-        httpx.post(
-            f"{st.session_state.chaos_url}/inject/{fault_type}",
-            json=payload,
-            timeout=3.0,
-        )
-        _log(f"Chaos Mesh ACK for {fault_type}", "ok")
-    except Exception:
-        _log(f"Chaos API offline — fault '{fault_type}' queued locally", "warn")
- 
+        path = chaos_files[fault]
+        subprocess.run(["kubectl", "delete", "-f", path, "--ignore-not-found"], capture_output=True)
+        subprocess.run(["kubectl", "apply",  "-f", path], capture_output=True)
+        _log(f"☢️ Chaos injected: {fault}", "crit")
+    except Exception as e:
+        _log(f"Chaos trigger failed: {e}", "warn")
  
 def _execute_recovery(action: str) -> None:
     action_messages = {

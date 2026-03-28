@@ -1,0 +1,17 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: frontend-network-loss
+  namespace: chaos-testing
+spec:
+  action: loss
+  mode: one
+  selector:
+    namespaces:
+      - applications
+    labelSelectors:
+      app: frontend
+  loss:
+    loss: "100"
+    correlation: "100"
+  duration: "60s"
