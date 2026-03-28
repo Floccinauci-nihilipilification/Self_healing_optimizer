@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-mono: "JetBrains Mono", monospace;
+  --font-display: "Syne", sans-serif;
+  
+  /* Sentinel Custom SRE Colors */
+  --color-sre-bg: #080c14;
+  --color-sre-card: #0d1421;
+  --color-sre-border: #1e2d45;
+  --color-sre-cyan: #00e5ff;
+  --color-sre-amber: #ffab00;
+  --color-sre-red: #ff3d5a;
+  --color-sre-green: #00e676;
+  --color-sre-purple: #7c4dff;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-sre-bg);
+  color: #e2e8f0;
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom Scrollbar for Action Logs */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--color-sre-bg); }
+::-webkit-scrollbar-thumb { background: var(--color-sre-border); border-radius: 4px; }
