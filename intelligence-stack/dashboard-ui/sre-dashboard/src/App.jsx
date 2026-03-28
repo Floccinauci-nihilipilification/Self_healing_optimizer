@@ -8,7 +8,8 @@ import {
   Activity, Cpu, HardDrive, ShieldAlert, Zap, ServerCrash,
   Network, RefreshCw, Globe, AlertTriangle, Radio, Shield,
   TrendingUp, Database, GitBranch, Layers, Wifi, WifiOff,
-  MemoryStick, Siren, CheckCircle2, XCircle, Loader2
+  MemoryStick, Siren, CheckCircle2, XCircle, Loader2,
+  Target, Crosshair, RotateCcw, Flame, Heart
 } from 'lucide-react';
 
 const API_BASE_URL = 'http://localhost:8081/api/v1';
@@ -306,6 +307,334 @@ function AnalRow({ label, value, accent }) {
   );
 }
 
+// ─── Dependency graph data (mirrors cascade.py) ─────────────
+const DEPENDENCY_GRAPH = {
+  frontend: [['productcatalogservice', 0.9], ['cartservice', 0.85], ['recommendationservice', 0.6], ['currencyservice', 0.75], ['adservice', 0.3]],
+  checkoutservice: [['cartservice', 0.95], ['paymentservice', 0.99], ['emailservice', 0.5], ['currencyservice', 0.8], ['shippingservice', 0.85], ['productcatalogservice', 0.7]],
+  cartservice: [['redis-cart', 0.98]],
+  recommendationservice: [['productcatalogservice', 0.9]],
+  productcatalogservice: [],
+  paymentservice: [],
+  shippingservice: [],
+  emailservice: [],
+  currencyservice: [],
+  adservice: [['productcatalogservice', 0.4]],
+  'redis-cart': [],
+};
+
+const HEALTH_COLORS = {
+  HEALTHY: '#00e676',
+  DEGRADED: '#ffab00',
+  CRITICAL: '#ff6b35',
+  FAILED: '#ff3d5a',
+  RECOVERING: '#7c4dff',
+};
+
+// ─── Blast Radius Map (SVG) ──────────────────────────────────
+function BlastRadiusMap({ blastData }) {
+  const svgRef = useRef(null);
+  const [hoveredNode, setHoveredNode] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+  if (!blastData || !blastData.states) return (
+    <div style={{ padding: 40, textAlign: 'center', color: T.muted, fontSize: '0.65rem' }}>
+      <Loader2 size={20} style={{ animation: 'spin 1.2s linear infinite', margin: '0 auto 12px' }} />
+      <div>Connecting to Cascade Engine...</div>
+    </div>
+  );
+
+  const W = 700, H = 420;
+  const pad = 40;
+
+  const toSvg = (px, py) => [
+    pad + (px / 100) * (W - 2 * pad),
+    pad + ((100 - py) / 100) * (H - 2 * pad)
+  ];
+
+  const states = blastData.states;
+  const path = blastData.propagation_path || [];
+  const cascadeEdges = new Set();
+  for (let i = 0; i < path.length - 1; i++) {
+    cascadeEdges.add(`${path[i]}|${path[i + 1]}`);
+    cascadeEdges.add(`${path[i + 1]}|${path[i]}`);
+  }
+
+  // Build edges
+  const edges = [];
+  for (const [src, deps] of Object.entries(DEPENDENCY_GRAPH)) {
+    const sState = states[src];
+    if (!sState) continue;
+    const [x0, y0] = toSvg(sState.position[0], sState.position[1]);
+    for (const [dep] of deps) {
+      const dState = states[dep];
+      if (!dState) continue;
+      const [x1, y1] = toSvg(dState.position[0], dState.position[1]);
+      const isCascade = cascadeEdges.has(`${src}|${dep}`) || cascadeEdges.has(`${dep}|${src}`);
+      edges.push({ x0, y0, x1, y1, isCascade, src, dep });
+    }
+  }
+
+  const handleMouseMove = (e, svc) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (rect) {
+      setTooltipPos({ x: e.clientX - rect.left + 12, y: e.clientY - rect.top - 10 });
+    }
+    setHoveredNode(svc);
+  };
+
+  const hovState = hoveredNode ? states[hoveredNode] : null;
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <svg ref={svgRef} width="100%" height={H} viewBox={`0 0 ${W} ${H}`}
+        style={{ background: 'transparent', display: 'block' }}>
+        <defs>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="3" result="coloredBlur" />
+            <feMerge><feMergeNode in="coloredBlur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+          <filter id="glowRed">
+            <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#ff3d5a" floodOpacity="0.5" />
+          </filter>
+          <filter id="glowPurple">
+            <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#7c4dff" floodOpacity="0.5" />
+          </filter>
+        </defs>
+
+        {/* Edges */}
+        {edges.map((e, i) => (
+          <line key={i} x1={e.x0} y1={e.y0} x2={e.x1} y2={e.y1}
+            stroke={e.isCascade ? 'rgba(255,61,90,0.7)' : 'rgba(30,45,69,0.5)'}
+            strokeWidth={e.isCascade ? 2.5 : 1}
+            strokeDasharray={e.isCascade ? '6 3' : 'none'}
+          >
+            {e.isCascade && (
+              <animate attributeName="stroke-dashoffset" from="18" to="0" dur="1s" repeatCount="indefinite" />
+            )}
+          </line>
+        ))}
+
+        {/* Cascade depth labels */}
+        {path.length > 1 && path.slice(0, -1).map((svc, i) => {
+          const next = path[i + 1];
+          const s0 = states[svc], s1 = states[next];
+          if (!s0 || !s1) return null;
+          const [x0, y0] = toSvg(s0.position[0], s0.position[1]);
+          const [x1, y1] = toSvg(s1.position[0], s1.position[1]);
+          return (
+            <text key={`d${i}`} x={(x0 + x1) / 2} y={(y0 + y1) / 2 - 6}
+              textAnchor="middle" fill="#ff3d5a" fontSize="9" fontFamily="Inter"
+              style={{ pointerEvents: 'none' }}>
+              → depth {i + 1}
+            </text>
+          );
+        })}
+
+        {/* Pulse rings for failed/critical */}
+        {Object.values(states).filter(s => s.health === 'FAILED' || s.health === 'CRITICAL').map(s => {
+          const [cx, cy] = toSvg(s.position[0], s.position[1]);
+          return (
+            <circle key={`pulse-${s.name}`} cx={cx} cy={cy} r={28}
+              fill="none" stroke={HEALTH_COLORS[s.health]}
+              strokeWidth={1.5} opacity={0.5}
+              filter={s.health === 'FAILED' ? 'url(#glowRed)' : undefined}>
+              <animate attributeName="r" values="22;30;22" dur="2s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.6;0.15;0.6" dur="2s" repeatCount="indefinite" />
+            </circle>
+          );
+        })}
+
+        {/* Nodes */}
+        {Object.values(states).map(s => {
+          const [cx, cy] = toSvg(s.position[0], s.position[1]);
+          const r = Math.max(12, s.health_score * 0.15 + 8);
+          const col = HEALTH_COLORS[s.health] || '#00e676';
+          const isHov = hoveredNode === s.name;
+          const isRoot = blastData.root_cause === s.name;
+          return (
+            <g key={s.name}
+              onMouseMove={(e) => handleMouseMove(e, s.name)}
+              onMouseLeave={() => setHoveredNode(null)}
+              style={{ cursor: 'pointer' }}>
+              <circle cx={cx} cy={cy} r={isHov ? r + 4 : r}
+                fill={col + '25'}
+                stroke={col}
+                strokeWidth={isHov ? 2.5 : 1.5}
+                filter={isHov ? 'url(#glow)' : undefined}
+                style={{ transition: 'r 0.2s, stroke-width 0.2s' }}
+              />
+              <circle cx={cx} cy={cy} r={4}
+                fill={col}
+              />
+              <text x={cx} y={cy + r + 14}
+                textAnchor="middle" fill="#94a3b8" fontSize="9" fontFamily="Inter">
+                {s.display_name}
+              </text>
+              {isRoot && s.name !== 'none' && (
+                <text x={cx} y={cy - r - 6}
+                  textAnchor="middle" fill="#ff3d5a" fontSize="8" fontWeight="bold" fontFamily="Inter">
+                  ⚠ ROOT
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* Tooltip */}
+      {hovState && (
+        <div style={{
+          position: 'absolute', left: tooltipPos.x, top: tooltipPos.y,
+          background: 'rgba(8,12,20,0.95)', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 8, padding: '10px 14px', pointerEvents: 'none',
+          zIndex: 10, minWidth: 180, backdropFilter: 'blur(12px)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+        }}>
+          <div style={{ fontWeight: 700, fontSize: '0.75rem', color: HEALTH_COLORS[hovState.health], marginBottom: 6 }}>
+            {hovState.display_name}
+            {blastData.root_cause === hovState.name && <span style={{ color: '#ff3d5a' }}> ← ROOT</span>}
+          </div>
+          <div style={{ fontSize: '0.62rem', color: '#94a3b8', lineHeight: 1.8 }}>
+            <div>Health: <span style={{ color: HEALTH_COLORS[hovState.health] }}>{hovState.health}</span></div>
+            <div>Score: <span style={{ color: '#e2e8f0' }}>{hovState.health_score}%</span></div>
+            {hovState.failure_reason && <div>Reason: <span style={{ color: '#ffab00' }}>{hovState.failure_reason}</span></div>}
+            {hovState.metrics && (
+              <>
+                <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', margin: '4px 0', paddingTop: 4 }} />
+                <div>CPU: <span style={{ color: '#e2e8f0' }}>{hovState.metrics.cpu_percent}%</span></div>
+                <div>Memory: <span style={{ color: '#e2e8f0' }}>{hovState.metrics.memory_mb} MB</span></div>
+                <div>Replicas: <span style={{ color: '#e2e8f0' }}>{hovState.metrics.replicas_available}/{hovState.metrics.replicas_desired}</span></div>
+                {hovState.metrics.restart_count > 0 && (
+                  <div>Restarts: <span style={{ color: '#ff3d5a' }}>{hovState.metrics.restart_count}</span></div>
+                )}
+                <div>Pod: <span style={{ color: '#e2e8f0' }}>{hovState.metrics.pod_phase} ({hovState.metrics.pod_ready ? 'ready' : 'not ready'})</span></div>
+              </>
+            )}
+            {hovState.recovery_eta_s && <div>ETA: <span style={{ color: '#7c4dff' }}>{hovState.recovery_eta_s}s</span></div>}
+          </div>
+        </div>
+      )}
+
+      {/* Impact banner */}
+      {blastData.affected_count > 0 && (
+        <div style={{
+          position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(8,12,20,0.85)', border: `1px solid ${blastData.estimated_user_impact_pct >= 50 ? '#ff3d5a' : '#ffab00'}50`,
+          borderRadius: 6, padding: '4px 14px',
+          fontSize: '0.6rem', fontWeight: 600, letterSpacing: '0.06em',
+          color: blastData.estimated_user_impact_pct >= 50 ? '#ff3d5a' : '#ffab00',
+          fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap',
+        }}>
+          BLAST RADIUS: {blastData.affected_count}/{blastData.total_services} services · User Impact: {blastData.estimated_user_impact_pct}% · LIVE
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Cascade Status Table ────────────────────────────────────
+function CascadeStatusTable({ blastData }) {
+  if (!blastData || !blastData.legend_table) return null;
+
+  const rows = blastData.legend_table;
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.62rem' }}>
+        <thead>
+          <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+            {['Service', 'Health', 'Score', 'CPU', 'Memory', 'Replicas', 'Restarts', 'Reason', 'ETA'].map(h => (
+              <th key={h} style={{
+                padding: '8px 8px', textAlign: 'left', fontWeight: 600,
+                color: T.muted, letterSpacing: '0.1em', textTransform: 'uppercase',
+                fontSize: '0.55rem', whiteSpace: 'nowrap',
+              }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(row => (
+            <tr key={row.service_id} style={{
+              borderBottom: `1px solid ${T.border}`,
+              transition: 'background 0.2s',
+            }}
+              onMouseEnter={e => e.currentTarget.style.background = T.surfaceHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <td style={{ padding: '7px 8px', fontWeight: 600, color: T.text }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+                    background: row.color, boxShadow: `0 0 6px ${row.color}60`,
+                    flexShrink: 0,
+                  }} />
+                  {row.service}
+                </div>
+              </td>
+              <td style={{ padding: '7px 8px' }}>
+                <span style={{
+                  padding: '2px 8px', borderRadius: 4,
+                  background: `${row.color}15`, border: `1px solid ${row.color}30`,
+                  color: row.color, fontWeight: 600, fontSize: '0.55rem',
+                  letterSpacing: '0.05em',
+                }}>{row.health}</span>
+              </td>
+              <td style={{ padding: '7px 8px', color: row.color, fontWeight: 600 }}>{row.score}</td>
+              <td style={{ padding: '7px 8px', color: T.textSub }}>{row.cpu_percent || '—'}</td>
+              <td style={{ padding: '7px 8px', color: T.textSub }}>{row.memory_mb || '—'}</td>
+              <td style={{ padding: '7px 8px', color: T.textSub }}>{row.replicas || '—'}</td>
+              <td style={{ padding: '7px 8px', color: (row.restarts || 0) > 0 ? '#ff3d5a' : T.textSub }}>{row.restarts ?? '—'}</td>
+              <td style={{ padding: '7px 8px', color: '#ffab00', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.reason}</td>
+              <td style={{ padding: '7px 8px', color: T.violet }}>{row.eta}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Cascade Events Log ──────────────────────────────────────
+function CascadeEventsLog({ events }) {
+  if (!events || events.length === 0) return (
+    <div style={{ padding: 16, textAlign: 'center', color: T.muted, fontSize: '0.65rem' }}>
+      No cascade events detected — cluster nominal
+    </div>
+  );
+
+  return (
+    <div style={{ maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {[...events].reverse().map((ev, i) => (
+        <div key={i} style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px',
+          borderBottom: `1px solid ${T.border}`, fontSize: '0.6rem',
+        }}>
+          <span style={{ color: T.muted, fontFamily: 'monospace', flexShrink: 0, fontSize: '0.55rem' }}>
+            {new Date(ev.timestamp * 1000).toLocaleTimeString('en-US', { hour12: false })}
+          </span>
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+            background: HEALTH_COLORS[ev.current] || T.muted,
+          }} />
+          <span style={{ color: T.text, fontWeight: 500 }}>
+            {ev.service}
+          </span>
+          <span style={{ color: HEALTH_COLORS[ev.previous] || T.muted }}>{ev.previous}</span>
+          <span style={{ color: T.muted }}>→</span>
+          <span style={{ color: HEALTH_COLORS[ev.current] || T.muted, fontWeight: 600 }}>{ev.current}</span>
+          {ev.depth > 0 && (
+            <span style={{
+              padding: '1px 6px', borderRadius: 4, fontSize: '0.5rem',
+              background: 'rgba(255,61,90,0.1)', border: '1px solid rgba(255,61,90,0.25)',
+              color: '#ff3d5a', fontWeight: 600,
+            }}>depth {ev.depth}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Chaos button ────────────────────────────────────────────
 function ChaosButton({ label, desc, icon: Icon, onClick, active, disabled }) {
   const [hov, setHov] = useState(false);
@@ -392,6 +721,8 @@ export default function App() {
   const [serviceHealth, setServiceHealth] = useState(() => {
     const m = {}; MICROSERVICES.forEach(s => { m[s.id] = 'healthy'; }); return m;
   });
+  const [blastData, setBlastData] = useState(null);
+  const [blastTab, setBlastTab] = useState('map');
   const wasAnomalousRef = useRef(false);
   const recoveryTimerRef = useRef(null);
 
@@ -420,10 +751,13 @@ export default function App() {
     });
   }, []);
 
-  const healServices = useCallback(() => {
+  const healServices = useCallback((resetBlast = false) => {
     setServiceHealth(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { n[k] = 'healing'; }); return n; });
     setTimeout(() => {
       setServiceHealth(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { n[k] = 'healthy'; }); return n; });
+      if (resetBlast) {
+        axios.post(`${API_BASE_URL}/blast-radius/reset`).catch(() => { });
+      }
     }, 2000);
   }, []);
 
@@ -465,7 +799,7 @@ export default function App() {
             setChaosPhase('HEALING');
             setIframeStatus('HEALING');
             addLog('Self-healing engaged — recovering services...', 'heal');
-            healServices();
+            healServices(true);
             if (recoveryTimerRef.current) clearTimeout(recoveryTimerRef.current);
             recoveryTimerRef.current = setTimeout(() => {
               setIframeKey(k => k + 1);
@@ -494,6 +828,30 @@ export default function App() {
     return () => { clearInterval(iv); if (recoveryTimerRef.current) clearTimeout(recoveryTimerRef.current); };
   }, [addLog, healServices]);
 
+  // Blast radius polling
+  useEffect(() => {
+    let alive = true;
+    const fetchBlast = async () => {
+      try {
+        const res = await axios.get(`${API_BASE_URL}/blast-radius`);
+        if (alive) setBlastData(res.data);
+      } catch { /* silent */ }
+    };
+    fetchBlast();
+    const iv2 = setInterval(fetchBlast, 3000);
+    return () => { alive = false; clearInterval(iv2); };
+  }, []);
+
+  // Map chaos type → the root service that gets hit first
+  const CHAOS_ROOT_SERVICE = {
+    pod_kill: 'frontend',
+    scale_zero: 'frontend',
+    cpu_stress: 'frontend',
+    memory_stress: 'redis-cart',
+    network_delay: 'cartservice',
+    network_loss: 'checkoutservice',
+  };
+
   // Standard chaos
   const triggerChaos = async (type) => {
     setChaosPhase('INJECTING'); setActiveChaos(type);
@@ -504,6 +862,11 @@ export default function App() {
       setChaosPhase('DEGRADED'); setIframeStatus('DEGRADED');
       degradeServices(type);
       addLog(`Chaos deployed: ${type.replace(/_/g, ' ').toUpperCase()} — monitoring degradation...`, 'crit');
+
+      // Tell blast radius engine which service is the root cause
+      const rootSvc = CHAOS_ROOT_SERVICE[type] || 'frontend';
+      await axios.post(`${API_BASE_URL}/blast-radius/inject`, { type: rootSvc });
+      addLog(`Blast radius tracking: root=${rootSvc}`, 'warn');
     } catch (e) {
       addLog(`Failed to inject chaos: ${e.message}`, 'crit');
       setChaosPhase('NOMINAL'); setIframeStatus('LIVE'); setActiveChaos(null);
@@ -522,15 +885,20 @@ export default function App() {
       degradeServices('scale_zero');
       addLog('Frontend scaled to 0 — real 503 active in iframe', 'crit');
 
+      // Tell blast radius engine frontend is the root cause
+      await axios.post(`${API_BASE_URL}/blast-radius/inject`, { type: 'frontend' });
+      addLog('Blast radius tracking: root=frontend', 'warn');
+
       setTimeout(async () => {
         setChaosPhase('HEALING'); setIframeStatus('HEALING');
         addLog('Operator healing — scaling frontend back to 1...', 'heal');
         healServices();
         await axios.post(`${API_BASE_URL}/chaos/frontend-up`);
-        setTimeout(() => {
+        setTimeout(async () => {
           setIframeKey(k => k + 1);
           setChaosPhase('RECOVERED'); setIframeStatus('RECOVERED');
           addLog('Frontend recovered — site live again', 'ok');
+          await axios.post(`${API_BASE_URL}/blast-radius/reset`);
           setTimeout(() => { setChaosPhase('NOMINAL'); setIframeStatus('LIVE'); setActiveChaos(null); }, 4000);
         }, 8000);
       }, 30000);
@@ -756,6 +1124,65 @@ export default function App() {
                 {MICROSERVICES.map(svc => (
                   <ServiceNode key={svc.id} service={svc} health={serviceHealth[svc.id]} />
                 ))}
+              </div>
+            </div>
+
+            {/* ── Blast Radius & Cascade Section ── */}
+            <div style={{ ...card(), overflow: 'hidden' }}>
+              {/* Tab header */}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '12px 20px', borderBottom: `1px solid ${T.border}`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Target size={13} color={T.red} />
+                  <span style={{
+                    fontSize: '0.62rem', fontWeight: 600, color: T.textSub,
+                    letterSpacing: '0.14em', textTransform: 'uppercase',
+                  }}>
+                    Blast Radius & Cascade Engine
+                  </span>
+                  {blastData && blastData.affected_count > 0 && (
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 5, fontSize: '0.55rem', fontWeight: 700,
+                      background: 'rgba(255,61,90,0.12)', border: '1px solid rgba(255,61,90,0.3)',
+                      color: '#ff3d5a', letterSpacing: '0.08em',
+                    }}>
+                      {blastData.affected_count} AFFECTED
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[
+                    { id: 'map', label: 'Network Map', icon: Crosshair },
+                    { id: 'table', label: 'Status Table', icon: Layers },
+                    { id: 'events', label: 'Events', icon: Flame },
+                  ].map(tab => (
+                    <button key={tab.id}
+                      onClick={() => setBlastTab(tab.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '4px 10px', borderRadius: 6, border: 'none',
+                        background: blastTab === tab.id ? `${T.indigo}20` : T.surface,
+                        color: blastTab === tab.id ? T.indigo : T.muted,
+                        fontSize: '0.58rem', fontWeight: blastTab === tab.id ? 600 : 400,
+                        cursor: 'pointer', transition: 'all 0.15s', outline: 'none',
+                        fontFamily: "'Inter', system-ui, sans-serif",
+                        letterSpacing: '0.04em',
+                      }}
+                    >
+                      <tab.icon size={10} />
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tab content */}
+              <div style={{ padding: blastTab === 'map' ? '0' : '14px 20px', minHeight: 300 }}>
+                {blastTab === 'map' && <BlastRadiusMap blastData={blastData} />}
+                {blastTab === 'table' && <CascadeStatusTable blastData={blastData} />}
+                {blastTab === 'events' && <CascadeEventsLog events={blastData?.events} />}
               </div>
             </div>
 
