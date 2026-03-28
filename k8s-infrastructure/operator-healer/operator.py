@@ -5,26 +5,59 @@ Watches for chaos events, queries ML API, and auto-heals.
 
 import kopf
 import kubernetes
-import requests
-import logging
-import os
+import httpx
+import asyncio
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090")
 ML_API_URL = os.getenv("ML_API_URL", "http://ml-api-service.default.svc.cluster.local:8000")
+
+# Global clients (Initialized in startup)
+v1 = None
+apps_v1 = None
+httpx_client = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("self-healer")
 
 # ---------------------------------------------------------------------------
+# Kopf Startup: Initialize global clients once
+# ---------------------------------------------------------------------------
+@kopf.on.startup()
+async def configure(settings: kopf.OperatorSettings, **kwargs):
+    global v1, apps_v1, httpx_client
+    try:
+        kubernetes.config.load_incluster_config()
+        logger.info("☸️ Using In-Cluster Config")
+    except Exception:
+        kubernetes.config.load_kube_config()
+        logger.info("🏡 Using Local Kube Config")
+    
+    v1 = kubernetes.client.CoreV1Api()
+    apps_v1 = kubernetes.client.AppsV1Api()
+    httpx_client = httpx.AsyncClient()
+
+@kopf.on.cleanup()
+async def cleanup(**kwargs):
+    global httpx_client
+    if httpx_client:
+        await httpx_client.aclose()
+        logger.info("🧹 Shared HTTP client closed.")
+
+# ---------------------------------------------------------------------------
 # Helper: Query Prometheus for a pod's CPU usage
 # ---------------------------------------------------------------------------
-def get_pod_metrics(pod_name: str, namespace: str) -> dict:
+async def get_pod_metrics(pod_name: str, namespace: str) -> dict:
+    if not httpx_client:
+        return {"cpu_usage": 10.0, "mem_usage": 50.0, "latency_ms": 120.0}
     try:
         cpu_query = f'rate(container_cpu_usage_seconds_total{{pod="{pod_name}",namespace="{namespace}"}}[2m])'
         mem_query = f'container_memory_usage_bytes{{pod="{pod_name}",namespace="{namespace}"}}'
 
-        cpu_resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": cpu_query}, timeout=5)
-        mem_resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": mem_query}, timeout=5)
+        # Run queries in parallel for maximum speed
+        cpu_task = httpx_client.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": cpu_query}, timeout=3)
+        mem_task = httpx_client.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": mem_query}, timeout=3)
+        
+        cpu_resp, mem_resp = await asyncio.gather(cpu_task, mem_task)
 
         cpu_data = cpu_resp.json()["data"]["result"]
         mem_data = mem_resp.json()["data"]["result"]
@@ -42,9 +75,11 @@ def get_pod_metrics(pod_name: str, namespace: str) -> dict:
 # ---------------------------------------------------------------------------
 # Helper: Call ML API for anomaly analysis
 # ---------------------------------------------------------------------------
-def analyze_with_ml(metrics: dict) -> dict:
+async def analyze_with_ml(metrics: dict) -> dict:
+    if not httpx_client:
+        return {"is_anomaly": False, "threat_score": 0.0, "recommended_action": "NO_ACTION"}
     try:
-        resp = requests.post(f"{ML_API_URL}/api/v1/analyze", json=metrics, timeout=5)
+        resp = await httpx_client.post(f"{ML_API_URL}/api/v1/analyze", json=metrics, timeout=3)
         return resp.json()
     except Exception as e:
         logger.warning("ML API call failed: %s", e)
@@ -54,9 +89,9 @@ def analyze_with_ml(metrics: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Helper: Restart a pod
 # ---------------------------------------------------------------------------
-def restart_pod(pod_name: str, namespace: str):
-    kubernetes.config.load_incluster_config()
-    v1 = kubernetes.client.CoreV1Api()
+async def restart_pod(pod_name: str, namespace: str):
+    if not v1:
+        return
     try:
         v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
         logger.info("✅ Restarted pod: %s", pod_name)
@@ -67,9 +102,9 @@ def restart_pod(pod_name: str, namespace: str):
 # ---------------------------------------------------------------------------
 # Helper: Scale a deployment
 # ---------------------------------------------------------------------------
-def scale_deployment(deployment_name: str, namespace: str, replicas: int = 2):
-    kubernetes.config.load_incluster_config()
-    apps_v1 = kubernetes.client.AppsV1Api()
+async def scale_deployment(deployment_name: str, namespace: str, replicas: int = 2):
+    if not apps_v1:
+        return
     try:
         apps_v1.patch_namespaced_deployment_scale(
             name=deployment_name,
@@ -85,34 +120,38 @@ def scale_deployment(deployment_name: str, namespace: str, replicas: int = 2):
 # Kopf Handler: Watch pod failures
 # ---------------------------------------------------------------------------
 @kopf.on.field("pods", field="status.phase")
-def pod_phase_changed(old, new, name, namespace, **kwargs):
+async def pod_phase_changed(old, new, name, namespace, **kwargs):
     if namespace not in ["applications"]:
         return
 
     if new in ["Failed", "Unknown"]:
         logger.info("🚨 Pod %s in %s entered phase: %s", name, namespace, new)
 
-        metrics = get_pod_metrics(name, namespace)
-        result = analyze_with_ml(metrics)
+        metrics = await get_pod_metrics(name, namespace)
+        result = await analyze_with_ml(metrics)
 
         logger.info("🧠 ML Result: anomaly=%s score=%.3f action=%s",
-                    result["is_anomaly"], result["threat_score"], result["recommended_action"])
+                    result.get("is_anomaly"), result.get("threat_score"), result.get("recommended_action"))
 
-        if result["is_anomaly"]:
-            action = result["recommended_action"]
+        if result.get("is_anomaly"):
+            action = result.get("recommended_action")
             if action == "RESTART_POD":
-                restart_pod(name, namespace)
+                await restart_pod(name, namespace)
             elif action == "SCALE_OUT_HPA":
-                scale_deployment(name.rsplit("-", 2)[0], namespace, replicas=3)
+                await scale_deployment(name.rsplit("-", 2)[0], namespace, replicas=3)
             else:
-                restart_pod(name, namespace)
+                await restart_pod(name, namespace)
+        else:
+            # SAFETY FALLBACK: Even if ML says no anomaly, a Failed pod needs a restart for safety
+            logger.info("🛡️ Safety Fallback: Restarting Failed pod despite no ML anomaly verdict")
+            await restart_pod(name, namespace)
 
 
 # ---------------------------------------------------------------------------
 # Kopf Handler: Watch for high restart counts (CrashLoopBackOff)
 # ---------------------------------------------------------------------------
 @kopf.on.field("pods", field="status.containerStatuses")
-def container_status_changed(old, new, name, namespace, **kwargs):
+async def container_status_changed(old, new, name, namespace, **kwargs):
     if namespace not in ["applications"]:
         return
 
@@ -123,9 +162,16 @@ def container_status_changed(old, new, name, namespace, **kwargs):
         restart_count = container.get("restartCount", 0)
         if restart_count >= 3:
             logger.info("🔁 CrashLoop detected on %s (restarts=%d)", name, restart_count)
-            metrics = get_pod_metrics(name, namespace)
-            result = analyze_with_ml(metrics)
+            
+            # FAST TRACK: Bypassing ML calls if pod is already in a severe restart loop (restores faster)
+            if restart_count >= 5:
+                logger.warning("🚀 FAST TRACK: Pod in severe CrashLoop (>=5), bypassing ML analysis for instant restart.")
+                await restart_pod(name, namespace)
+                return
 
-            if result["is_anomaly"] or restart_count >= 5:
-                restart_pod(name, namespace)
+            metrics = await get_pod_metrics(name, namespace)
+            result = await analyze_with_ml(metrics)
+
+            if result.get("is_anomaly") or restart_count >= 5:
+                await restart_pod(name, namespace)
 
